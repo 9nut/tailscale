@@ -280,22 +280,6 @@ func (b *LocalBackend) StreamServe(ctx context.Context, w io.Writer, req ipn.Ser
 		return err
 	}
 
-	// Turn on Funnel for the given HostPort.
-	sc := b.ServeConfig().AsStruct()
-	if sc == nil {
-		sc = &ipn.ServeConfig{}
-	}
-	setHandler(sc, req)
-	if err := b.SetServeConfig(sc); err != nil {
-		return fmt.Errorf("errro setting serve config: %w", err)
-	}
-	// Defer turning off Funnel once stream ends.
-	defer func() {
-		sc := b.ServeConfig().AsStruct()
-		deleteHandler(sc, req, port)
-		err = errors.Join(err, b.SetServeConfig(sc))
-	}()
-
 	var writeErrs []error
 	writeToStream := func(log ipn.FunnelRequestLog) {
 		jsonLog, err := json.Marshal(log)
@@ -334,63 +318,6 @@ func (b *LocalBackend) StreamServe(ctx context.Context, w io.Writer, req ipn.Ser
 	}
 
 	return errors.Join(writeErrs...)
-}
-
-func setHandler(sc *ipn.ServeConfig, req ipn.ServeStreamRequest) {
-	if sc.TCP == nil {
-		sc.TCP = make(map[uint16]*ipn.TCPPortHandler)
-	}
-	if _, ok := sc.TCP[443]; !ok {
-		sc.TCP[443] = &ipn.TCPPortHandler{
-			HTTPS:     true,
-			Ephemeral: true,
-		}
-	}
-	if sc.Web == nil {
-		sc.Web = make(map[ipn.HostPort]*ipn.WebServerConfig)
-	}
-	wsc, ok := sc.Web[req.HostPort]
-	if !ok {
-		wsc = &ipn.WebServerConfig{}
-		sc.Web[req.HostPort] = wsc
-	}
-	if wsc.Handlers == nil {
-		wsc.Handlers = make(map[string]*ipn.HTTPHandler)
-	}
-	wsc.Handlers[req.MountPoint] = &ipn.HTTPHandler{
-		Proxy: req.Source,
-	}
-	if sc.AllowFunnel == nil {
-		sc.AllowFunnel = make(map[ipn.HostPort]bool)
-	}
-	sc.AllowFunnel[req.HostPort] = true
-}
-
-func deleteHandler(sc *ipn.ServeConfig, req ipn.ServeStreamRequest, port uint16) {
-	delete(sc.AllowFunnel, req.HostPort)
-	if sc.TCP != nil {
-		delete(sc.TCP, port)
-	}
-	if sc.Web == nil {
-		return
-	}
-	if sc.Web[req.HostPort] == nil {
-		return
-	}
-	wsc, ok := sc.Web[req.HostPort]
-	if !ok {
-		return
-	}
-	if wsc.Handlers == nil {
-		return
-	}
-	if _, ok := wsc.Handlers[req.MountPoint]; !ok {
-		return
-	}
-	delete(wsc.Handlers, req.MountPoint)
-	if len(wsc.Handlers) == 0 {
-		delete(sc.Web, req.HostPort)
-	}
 }
 
 func (b *LocalBackend) maybeLogServeConnection(destPort uint16, srcAddr netip.AddrPort) {

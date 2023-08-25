@@ -146,7 +146,8 @@ type localServeClient interface {
 // It also contains the flags, as registered with newServeCommand.
 type serveEnv struct {
 	// flags
-	json bool // output JSON (status only for now)
+	json       bool // output JSON (status only for now)
+	background bool // run funnel in the background
 
 	lc localServeClient // localClient interface, specific to serve
 
