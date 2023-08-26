@@ -55,8 +55,43 @@ func newFunnelDevCommand(e *serveEnv) *ffcli.Command {
 				}),
 				UsageFunc: usageFunc,
 			},
+			{
+				Name:      "attach",
+				Exec:      e.runFunnelAttach,
+				ShortHelp: "show current serve/Funnel status",
+				FlagSet: e.newFlags("funnel-attach", func(fs *flag.FlagSet) {
+					fs.BoolVar(&e.json, "json", false, "output JSON")
+				}),
+				UsageFunc: usageFunc,
+			},
 		},
 	}
+}
+
+func (e *serveEnv) runFunnelAttach(ctx context.Context, args []string) error {
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
+	if len(args) != 1 {
+		return flag.ErrHelp
+	}
+
+	st, err := e.getLocalClientStatusWithoutPeers(ctx)
+	if err != nil {
+		return fmt.Errorf("getting client status: %w", err)
+	}
+
+	if err := e.verifyFunnelEnabled(ctx, st, 443); err != nil {
+		return err
+	}
+
+	dnsName := strings.TrimSuffix(st.Self.DNSName, ".")
+	hp := ipn.HostPort(dnsName + ":443") // TODO(marwan-at-work): support the 2 other ports
+	req := ipn.ServeStreamRequest{
+		HostPort: hp,
+		// Source:     source,
+		// MountPoint: "/", // TODO(marwan-at-work): support multiple mount points
+	}
+	return e.streamServe(ctx, req)
 }
 
 // runFunnelDev is the entry point for the "tailscale funnel" subcommand and
