@@ -156,7 +156,13 @@ type localServeClient interface {
 // It also contains the flags, as registered with newServeCommand.
 type serveEnv struct {
 	// flags
-	json bool // output JSON (status only for now)
+	json             bool   // output JSON (status only for now)
+	daemon           bool   // daemon mode
+	servePath        string // serve path
+	https            string // HTTP port
+	http             string // HTTP port
+	tcp              string // TCP port
+	tlsTerminatedTcp string // a TLS terminated TCP port
 
 	lc localServeClient // localClient interface, specific to serve
 
@@ -277,12 +283,12 @@ func (e *serveEnv) runServe(ctx context.Context, args []string) error {
 			return e.handleWebServeRemove(ctx, srcPort, mount)
 		}
 		useTLS := srcType == "https"
-		return e.handleWebServe(ctx, srcPort, useTLS, mount, args[2])
+		return e.handleWebServe(ctx, srcPort, useTLS, mount, args[2], false)
 	case "tcp", "tls-terminated-tcp":
 		if turnOff {
 			return e.handleTCPServeRemove(ctx, srcPort)
 		}
-		return e.handleTCPServe(ctx, srcType, srcPort, args[1])
+		return e.handleTCPServe(ctx, srcType, srcPort, args[1], false)
 	default:
 		fmt.Fprintf(os.Stderr, "error: invalid serve type %q\n", srcType)
 		fmt.Fprint(os.Stderr, "must be one of: http:<port>, https:<port>, tcp:<port> or tls-terminated-tcp:<port>\n\n", srcType)
@@ -298,7 +304,7 @@ func (e *serveEnv) runServe(ctx context.Context, args []string) error {
 //   - tailscale serve https / http://localhost:3000
 //   - tailscale serve https:8443 /files/ /home/alice/shared-files/
 //   - tailscale serve https:10000 /motd.txt text:"Hello, world!"
-func (e *serveEnv) handleWebServe(ctx context.Context, srvPort uint16, useTLS bool, mount, source string) error {
+func (e *serveEnv) handleWebServe(ctx context.Context, srvPort uint16, useTLS bool, mount, source string, funnel bool) error {
 	h := new(ipn.HTTPHandler)
 
 	ts, _, _ := strings.Cut(source, ":")
@@ -378,6 +384,13 @@ func (e *serveEnv) handleWebServe(ctx context.Context, srvPort uint16, useTLS bo
 			delete(sc.Web[hp].Handlers, k)
 			continue
 		}
+	}
+
+	// Setting funnel here removes another roundtrip for get/set ServeConfig
+	// when we also need funnel enabled for the handler. However, verifyFunnelEnabled
+	// will still need to be checked as that is not handled here currently.
+	if funnel {
+		mak.Set(&sc.AllowFunnel, hp, true)
 	}
 
 	if !reflect.DeepEqual(cursc, sc) {
@@ -533,7 +546,7 @@ func expandProxyTarget(source string) (string, error) {
 // Examples:
 //   - tailscale serve tcp:2222 tcp://localhost:22
 //   - tailscale serve tls-terminated-tcp:8443 tcp://localhost:8080
-func (e *serveEnv) handleTCPServe(ctx context.Context, srcType string, srcPort uint16, dest string) error {
+func (e *serveEnv) handleTCPServe(ctx context.Context, srcType string, srcPort uint16, dest string, funnel bool) error {
 	var terminateTLS bool
 	switch srcType {
 	case "tcp":
@@ -593,6 +606,14 @@ func (e *serveEnv) handleTCPServe(ctx context.Context, srcType string, srcPort u
 	}
 	if terminateTLS {
 		sc.TCP[srcPort].TerminateTLS = dnsName
+	}
+
+	// Setting funnel here removes another roundtrip for get/set ServeConfig
+	// when we also need funnel enabled for the handler. However, verifyFunnelEnabled
+	// will still need to be checked as that is not handled here currently.
+	if funnel {
+		hp := ipn.HostPort(net.JoinHostPort(dnsName, dstPortStr))
+		mak.Set(&sc.AllowFunnel, hp, true)
 	}
 
 	if !reflect.DeepEqual(cursc, sc) {

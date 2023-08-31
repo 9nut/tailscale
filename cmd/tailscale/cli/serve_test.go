@@ -63,6 +63,7 @@ func TestServeConfigMutations(t *testing.T) {
 		line    int                            // line number of addStep call, for error messages
 
 		debugBreak func()
+		funnelDev  bool // use the in-development funnel implementation
 	}
 	var steps []step
 	add := func(s step) {
@@ -70,6 +71,7 @@ func TestServeConfigMutations(t *testing.T) {
 		steps = append(steps, s)
 	}
 
+	// current
 	// funnel
 	add(step{reset: true})
 	add(step{
@@ -685,6 +687,50 @@ func TestServeConfigMutations(t *testing.T) {
 		wantErr: anyErr(),
 	})
 
+	// funnel/serve development
+	add(step{reset: true})
+	add(step{
+		command:   cmd("funnel -d localhost:3000"),
+		funnelDev: true,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo.test.ts.net:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Proxy: "http://127.0.0.1:3000"},
+				}},
+			},
+			AllowFunnel: map[ipn.HostPort]bool{"foo.test.ts.net:443": true},
+		},
+	})
+
+	add(step{reset: true})
+	add(step{
+		command:   cmd("serve -d localhost:3000"),
+		funnelDev: true,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo.test.ts.net:443": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Proxy: "http://127.0.0.1:3000"},
+				}},
+			},
+		},
+	})
+
+	add(step{reset: true})
+	add(step{
+		command:   cmd("serve set --http=80 localhost:3000"),
+		funnelDev: true,
+		want: &ipn.ServeConfig{
+			TCP: map[uint16]*ipn.TCPPortHandler{80: {HTTP: true}},
+			Web: map[ipn.HostPort]*ipn.WebServerConfig{
+				"foo.test.ts.net:80": {Handlers: map[string]*ipn.HTTPHandler{
+					"/": {Proxy: "http://127.0.0.1:3000"},
+				}},
+			},
+		},
+	})
+
 	lc := &fakeLocalServeClient{}
 	// And now run the steps above.
 	for i, st := range steps {
@@ -710,12 +756,23 @@ func TestServeConfigMutations(t *testing.T) {
 		lastCount := lc.setCount
 		var cmd *ffcli.Command
 		var args []string
-		if st.command[0] == "funnel" {
-			cmd = newFunnelCommand(e)
-			args = st.command[1:]
+		if st.funnelDev {
+			fmt.Printf("dev: %v\n", st.command[0])
+			if st.command[0] == "funnel" {
+				cmd = newServeDevCommand(e, "funnel")
+				args = st.command[1:]
+			} else {
+				cmd = newServeDevCommand(e, "serve")
+				args = st.command[1:]
+			}
 		} else {
-			cmd = newServeCommand(e)
-			args = st.command
+			if st.command[0] == "funnel" {
+				cmd = newFunnelCommand(e)
+				args = st.command[1:]
+			} else {
+				cmd = newServeCommand(e)
+				args = st.command
+			}
 		}
 		err := cmd.ParseAndRun(context.Background(), args)
 		if flagOut.Len() > 0 {
@@ -745,6 +802,9 @@ func TestServeConfigMutations(t *testing.T) {
 			// though the actual state is different. Use below to debug:
 			// t.Fatalf("[%d] %v: bad state. got:\n%+v\n\nwant:\n%+v\n",
 			// 	i, st.command, got, st.want)
+		}
+		if st.funnelDev {
+			os.Unsetenv("TAILSCALE_FUNNEL_DEV")
 		}
 	}
 }
@@ -834,6 +894,74 @@ func TestVerifyFunnelEnabled(t *testing.T) {
 			}
 			if got != tt.wantErr {
 				t.Errorf("wrong error; got=%s, want=%s", gotErr, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSrcTypeFromFlags(t *testing.T) {
+	tests := []struct {
+		name         string
+		env          *serveEnv
+		expectedType string
+		expectedPort uint16
+		expectedErr  bool
+	}{
+		{
+			name:         "only http set",
+			env:          &serveEnv{http: "80"},
+			expectedType: "http",
+			expectedPort: 80,
+			expectedErr:  false,
+		},
+		{
+			name:         "only https set",
+			env:          &serveEnv{https: "10000"},
+			expectedType: "https",
+			expectedPort: 10000,
+			expectedErr:  false,
+		},
+		{
+			name:         "only tcp set",
+			env:          &serveEnv{tcp: "8000"},
+			expectedType: "tcp",
+			expectedPort: 8000,
+			expectedErr:  false,
+		},
+		{
+			name:         "only tls-terminated-tcp set",
+			env:          &serveEnv{tlsTerminatedTcp: "8080"},
+			expectedType: "tls-terminated-tcp",
+			expectedPort: 8080,
+			expectedErr:  false,
+		},
+		{
+			name:         "defaults to https, port 443",
+			env:          &serveEnv{},
+			expectedType: "https",
+			expectedPort: 443,
+			expectedErr:  false,
+		},
+		{
+			name:         "multiple types set",
+			env:          &serveEnv{http: "80", https: "443"},
+			expectedType: "",
+			expectedPort: 0,
+			expectedErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srcType, srcPort, err := srcTypeAndPortFromFlags(tt.env)
+			if (err != nil) != tt.expectedErr {
+				t.Errorf("Expected error: %v, got: %v", tt.expectedErr, err)
+			}
+			if srcType != tt.expectedType {
+				t.Errorf("Expected srcType: %s, got: %s", tt.expectedType, srcType)
+			}
+			if srcPort != tt.expectedPort {
+				t.Errorf("Expected srcPort: %d, got: %d", tt.expectedPort, srcPort)
 			}
 		})
 	}
