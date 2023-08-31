@@ -66,6 +66,8 @@ const (
 	NotifyInitialNetMap // if set, the first Notify message (sent immediately) will contain the current NetMap
 
 	NotifyNoPrivateKeys // if set, private keys that would normally be sent in updates are zeroed out
+
+	NotifyServeRequest // if set, Serve requests will be sent to the watcher
 )
 
 // Notify is a communication from a backend (e.g. tailscaled) to a frontend
@@ -74,8 +76,9 @@ const (
 // that they have not changed.
 // They are JSON-encoded on the wire, despite the lack of struct tags.
 type Notify struct {
-	_       structs.Incomparable
-	Version string // version number of IPN backend
+	_         structs.Incomparable
+	Version   string // version number of IPN backend
+	SessionID string // identifies the unique WatchIPNBus session.
 
 	// ErrMessage, if non-nil, contains a critical error message.
 	// For State InUseOtherUser, ErrMessage is not critical and just contains the details.

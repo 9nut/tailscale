@@ -5,7 +5,9 @@ package ipnlocal
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1928,6 +1930,10 @@ func (b *LocalBackend) ResendHostinfoIfNeeded() {
 func (b *LocalBackend) WatchNotifications(ctx context.Context, mask ipn.NotifyWatchOpt, onWatchAdded func(), fn func(roNotify *ipn.Notify) (keepGoing bool)) {
 	ch := make(chan *ipn.Notify, 128)
 
+	randomBytes := make([]byte, 16)
+	rand.Read(randomBytes)
+	sessionID := hex.EncodeToString(randomBytes)
+
 	origFn := fn
 	if mask&ipn.NotifyNoPrivateKeys != 0 {
 		fn = func(n *ipn.Notify) bool {
@@ -1951,7 +1957,7 @@ func (b *LocalBackend) WatchNotifications(ctx context.Context, mask ipn.NotifyWa
 	b.mu.Lock()
 	const initialBits = ipn.NotifyInitialState | ipn.NotifyInitialPrefs | ipn.NotifyInitialNetMap
 	if mask&initialBits != 0 {
-		ini = &ipn.Notify{Version: version.Long()}
+		ini = &ipn.Notify{Version: version.Long(), SessionID: sessionID}
 		if mask&ipn.NotifyInitialState != 0 {
 			ini.State = ptr.To(b.state)
 			if b.state == ipn.NeedsLogin {
@@ -2002,11 +2008,20 @@ func (b *LocalBackend) WatchNotifications(ctx context.Context, mask ipn.NotifyWa
 		go b.pollRequestEngineStatus(ctx)
 	}
 
+	if mask&ipn.NotifyServeRequest != 0 {
+		defer func() {
+			sc := b.ServeConfig().AsStruct()
+			delete(sc.Foreground, sessionID)
+			b.SetServeConfig(sc) // TODO: check err
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case n := <-ch:
+			n.SessionID = sessionID
 			if !fn(n) {
 				return
 			}
@@ -4113,22 +4128,30 @@ func (b *LocalBackend) setTCPPortsInterceptedFromNetmapAndPrefsLocked(prefs ipn.
 
 	b.reloadServeConfigLocked(prefs, changed)
 	if b.serveConfig.Valid() {
-		servePorts := make([]uint16, 0, 3)
-		b.serveConfig.TCP().Range(func(port uint16, _ ipn.TCPPortHandlerView) bool {
-			if port > 0 {
-				servePorts = append(servePorts, uint16(port))
+		setServeProxy := func(tcpCfg views.MapFn[uint16, *ipn.TCPPortHandler, ipn.TCPPortHandlerView]) {
+			servePorts := make([]uint16, 0, 3)
+			tcpCfg.Range(func(port uint16, _ ipn.TCPPortHandlerView) bool {
+				if port > 0 {
+					servePorts = append(servePorts, uint16(port))
+				}
+				return true
+			})
+			handlePorts = append(handlePorts, servePorts...)
+
+			b.setServeProxyHandlersLocked()
+
+			// don't listen on netmap addresses if we're in userspace mode
+			if !b.sys.IsNetstack() {
+				b.updateServeTCPPortNetMapAddrListenersLocked(servePorts)
 			}
+		}
+		b.serveConfig.Foreground().Range(func(k string, v ipn.ServeConfigView) (cont bool) {
+			setServeProxy(v.TCP())
 			return true
 		})
-		handlePorts = append(handlePorts, servePorts...)
-
-		b.setServeProxyHandlersLocked()
-
-		// don't listen on netmap addresses if we're in userspace mode
-		if !b.sys.IsNetstack() {
-			b.updateServeTCPPortNetMapAddrListenersLocked(servePorts)
-		}
+		setServeProxy(b.serveConfig.TCP())
 	}
+
 	// Kick off a Hostinfo update to control if WireIngress changed.
 	if wire := b.wantIngressLocked(); b.hostinfo != nil && b.hostinfo.WireIngress != wire {
 		b.logf("Hostinfo.WireIngress changed to %v", wire)
@@ -4147,31 +4170,38 @@ func (b *LocalBackend) setServeProxyHandlersLocked() {
 		return
 	}
 	var backends map[string]bool
-	b.serveConfig.Web().Range(func(_ ipn.HostPort, conf ipn.WebServerConfigView) (cont bool) {
-		conf.Handlers().Range(func(_ string, h ipn.HTTPHandlerView) (cont bool) {
-			backend := h.Proxy()
-			if backend == "" {
-				// Only create proxy handlers for servers with a proxy backend.
-				return true
-			}
-			mak.Set(&backends, backend, true)
-			if _, ok := b.serveProxyHandlers.Load(backend); ok {
-				return true
-			}
+	f := func(web views.MapFn[ipn.HostPort, *ipn.WebServerConfig, ipn.WebServerConfigView]) {
+		web.Range(func(_ ipn.HostPort, conf ipn.WebServerConfigView) (cont bool) {
+			conf.Handlers().Range(func(_ string, h ipn.HTTPHandlerView) (cont bool) {
+				backend := h.Proxy()
+				if backend == "" {
+					// Only create proxy handlers for servers with a proxy backend.
+					return true
+				}
+				mak.Set(&backends, backend, true)
+				if _, ok := b.serveProxyHandlers.Load(backend); ok {
+					return true
+				}
 
-			b.logf("serve: creating a new proxy handler for %s", backend)
-			p, err := b.proxyHandlerForBackend(backend)
-			if err != nil {
-				// The backend endpoint (h.Proxy) should have been validated by expandProxyTarget
-				// in the CLI, so just log the error here.
-				b.logf("[unexpected] could not create proxy for %v: %s", backend, err)
+				b.logf("serve: creating a new proxy handler for %s", backend)
+				p, err := b.proxyHandlerForBackend(backend)
+				if err != nil {
+					// The backend endpoint (h.Proxy) should have been validated by expandProxyTarget
+					// in the CLI, so just log the error here.
+					b.logf("[unexpected] could not create proxy for %v: %s", backend, err)
+					return true
+				}
+				b.serveProxyHandlers.Store(backend, p)
 				return true
-			}
-			b.serveProxyHandlers.Store(backend, p)
+			})
 			return true
 		})
+	}
+	b.serveConfig.Foreground().Range(func(k string, v ipn.ServeConfigView) (cont bool) {
+		f(v.Web())
 		return true
 	})
+	f(b.serveConfig.Web())
 
 	// Clean up handlers for proxy backends that are no longer present
 	// in configuration.

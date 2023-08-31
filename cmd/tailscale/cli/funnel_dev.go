@@ -5,10 +5,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 
@@ -58,6 +60,8 @@ func newFunnelDevCommand(e *serveEnv) *ffcli.Command {
 //
 // Note: funnel is only supported on single DNS name for now. (2023-08-18)
 func (e *serveEnv) runFunnelDev(ctx context.Context, args []string) error {
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
 	if len(args) != 1 {
 		return flag.ErrHelp
 	}
@@ -99,6 +103,28 @@ func (e *serveEnv) runFunnelDev(ctx context.Context, args []string) error {
 }
 
 func (e *serveEnv) streamServe(ctx context.Context, req ipn.ServeStreamRequest) error {
+	watcher, err := e.lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+	if err != nil {
+		return err
+	}
+	defer watcher.Close()
+	n, err := watcher.Next()
+	if err != nil {
+		return err
+	}
+	if n.SessionID == "" {
+		return errors.New("missing session id")
+	}
+	sc, err := e.lc.GetServeConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting serve config: %w", err)
+	}
+	setHandler(sc, req, n.SessionID)
+	err = e.lc.SetServeConfig(ctx, sc)
+	if err != nil {
+		return fmt.Errorf("error setting serve config: %w", err)
+	}
+
 	stream, err := e.lc.StreamServe(ctx, req)
 	if err != nil {
 		return err
@@ -109,4 +135,37 @@ func (e *serveEnv) streamServe(ctx context.Context, req ipn.ServeStreamRequest) 
 	fmt.Fprintf(os.Stderr, "Press Ctrl-C to stop Funnel.\n\n")
 	_, err = io.Copy(os.Stdout, stream)
 	return err
+}
+
+func setHandler(sc *ipn.ServeConfig, req ipn.ServeStreamRequest, sessionID string) {
+	if sc.Foreground == nil {
+		sc.Foreground = make(map[string]*ipn.ServeConfig)
+	}
+	if sc.Foreground[sessionID] == nil {
+		sc.Foreground[sessionID] = &ipn.ServeConfig{}
+	}
+	if sc.Foreground[sessionID].TCP == nil {
+		sc.Foreground[sessionID].TCP = make(map[uint16]*ipn.TCPPortHandler)
+	}
+	if _, ok := sc.Foreground[sessionID].TCP[443]; !ok {
+		sc.Foreground[sessionID].TCP[443] = &ipn.TCPPortHandler{HTTPS: true}
+	}
+	if sc.Foreground[sessionID].Web == nil {
+		sc.Foreground[sessionID].Web = make(map[ipn.HostPort]*ipn.WebServerConfig)
+	}
+	wsc, ok := sc.Foreground[sessionID].Web[req.HostPort]
+	if !ok {
+		wsc = &ipn.WebServerConfig{}
+		sc.Foreground[sessionID].Web[req.HostPort] = wsc
+	}
+	if wsc.Handlers == nil {
+		wsc.Handlers = make(map[string]*ipn.HTTPHandler)
+	}
+	wsc.Handlers[req.MountPoint] = &ipn.HTTPHandler{
+		Proxy: req.Source,
+	}
+	if sc.AllowFunnel == nil {
+		sc.AllowFunnel = make(map[ipn.HostPort]bool)
+	}
+	sc.AllowFunnel[req.HostPort] = true
 }

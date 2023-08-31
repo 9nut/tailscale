@@ -175,11 +175,18 @@ func (v ServeConfigView) AllowFunnel() views.Map[HostPort, bool] {
 	return views.MapOf(v.ж.AllowFunnel)
 }
 
+func (v ServeConfigView) Foreground() views.MapFn[string, *ServeConfig, ServeConfigView] {
+	return views.MapFnOf(v.ж.Foreground, func(t *ServeConfig) ServeConfigView {
+		return t.View()
+	})
+}
+
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _ServeConfigViewNeedsRegeneration = ServeConfig(struct {
 	TCP         map[uint16]*TCPPortHandler
 	Web         map[HostPort]*WebServerConfig
 	AllowFunnel map[HostPort]bool
+	Foreground  map[string]*ServeConfig
 }{})
 
 // View returns a readonly view of TCPPortHandler.
@@ -231,7 +238,6 @@ func (v TCPPortHandlerView) HTTPS() bool          { return v.ж.HTTPS }
 func (v TCPPortHandlerView) HTTP() bool           { return v.ж.HTTP }
 func (v TCPPortHandlerView) TCPForward() string   { return v.ж.TCPForward }
 func (v TCPPortHandlerView) TerminateTLS() string { return v.ж.TerminateTLS }
-func (v TCPPortHandlerView) Ephemeral() bool      { return v.ж.Ephemeral }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _TCPPortHandlerViewNeedsRegeneration = TCPPortHandler(struct {
@@ -239,7 +245,6 @@ var _TCPPortHandlerViewNeedsRegeneration = TCPPortHandler(struct {
 	HTTP         bool
 	TCPForward   string
 	TerminateTLS string
-	Ephemeral    bool
 }{})
 
 // View returns a readonly view of HTTPHandler.
