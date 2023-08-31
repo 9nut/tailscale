@@ -74,8 +74,9 @@ const (
 // that they have not changed.
 // They are JSON-encoded on the wire, despite the lack of struct tags.
 type Notify struct {
-	_       structs.Incomparable
-	Version string // version number of IPN backend
+	_         structs.Incomparable
+	Version   string // version number of IPN backend
+	SessionID string // identifies the unique WatchIPNBus session.
 
 	// ErrMessage, if non-nil, contains a critical error message.
 	// For State InUseOtherUser, ErrMessage is not critical and just contains the details.

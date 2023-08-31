@@ -5,7 +5,9 @@ package ipnlocal
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1939,6 +1941,10 @@ func (b *LocalBackend) ResendHostinfoIfNeeded() {
 func (b *LocalBackend) WatchNotifications(ctx context.Context, mask ipn.NotifyWatchOpt, onWatchAdded func(), fn func(roNotify *ipn.Notify) (keepGoing bool)) {
 	ch := make(chan *ipn.Notify, 128)
 
+	randomBytes := make([]byte, 16)
+	rand.Read(randomBytes)
+	sessionID := hex.EncodeToString(randomBytes)
+
 	origFn := fn
 	if mask&ipn.NotifyNoPrivateKeys != 0 {
 		fn = func(n *ipn.Notify) bool {
@@ -1962,7 +1968,7 @@ func (b *LocalBackend) WatchNotifications(ctx context.Context, mask ipn.NotifyWa
 	b.mu.Lock()
 	const initialBits = ipn.NotifyInitialState | ipn.NotifyInitialPrefs | ipn.NotifyInitialNetMap
 	if mask&initialBits != 0 {
-		ini = &ipn.Notify{Version: version.Long()}
+		ini = &ipn.Notify{Version: version.Long(), SessionID: sessionID}
 		if mask&ipn.NotifyInitialState != 0 {
 			ini.State = ptr.To(b.state)
 			if b.state == ipn.NeedsLogin {
@@ -2018,6 +2024,7 @@ func (b *LocalBackend) WatchNotifications(ctx context.Context, mask ipn.NotifyWa
 		case <-ctx.Done():
 			return
 		case n := <-ch:
+			n.SessionID = sessionID
 			if !fn(n) {
 				return
 			}
