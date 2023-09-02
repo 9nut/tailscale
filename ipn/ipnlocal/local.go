@@ -268,6 +268,10 @@ type LocalBackend struct {
 	// at the moment that tkaSyncLock is taken).
 	tkaSyncLock sync.Mutex
 	clock       tstime.Clock
+
+	// watchIDs contains all session ids created when
+	// clients call *LocalBackend.WatchNotifications
+	watchIDs map[string]struct{}
 }
 
 // clientGen is a func that creates a control plane client.
@@ -1966,6 +1970,15 @@ func (b *LocalBackend) WatchNotifications(ctx context.Context, mask ipn.NotifyWa
 	var ini *ipn.Notify
 
 	b.mu.Lock()
+
+	mak.NonNilMapForJSON(&b.watchIDs)
+	b.watchIDs[sessionID] = struct{}{}
+	defer func() {
+		b.mu.Lock()
+		delete(b.watchIDs, sessionID)
+		b.mu.Unlock()
+	}()
+
 	const initialBits = ipn.NotifyInitialState | ipn.NotifyInitialPrefs | ipn.NotifyInitialNetMap
 	if mask&initialBits != 0 {
 		ini = &ipn.Notify{Version: version.Long(), SessionID: sessionID}
