@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"go4.org/mem"
 	"tailscale.com/ipn"
 	"tailscale.com/logtail/backoff"
@@ -262,73 +261,7 @@ func (b *LocalBackend) ServeConfig() ipn.ServeConfigView {
 	return b.serveConfig
 }
 
-// StreamServe opens a stream to write any incoming connections made
-// to the given HostPort out to the listening io.Writer.
-//
-// If Serve and Funnel were not already enabled for the HostPort in the ServeConfig,
-// the backend enables it for the duration of the context's lifespan and
-// then turns it back off once the context is closed. If either are already enabled,
-// then they remain that way but logs are still streamed
-func (b *LocalBackend) StreamServe(ctx context.Context, w io.Writer, req ipn.ServeStreamRequest) (err error) {
-	f, ok := w.(http.Flusher)
-	if !ok {
-		return errors.New("writer not a flusher")
-	}
-	f.Flush()
-
-	port, err := req.HostPort.Port()
-	if err != nil {
-		return err
-	}
-
-	var writeErrs []error
-	writeToStream := func(log ipn.FunnelRequestLog) {
-		jsonLog, err := json.Marshal(log)
-		if err != nil {
-			writeErrs = append(writeErrs, err)
-			return
-		}
-		if _, err := fmt.Fprintf(w, "%s\n", jsonLog); err != nil {
-			writeErrs = append(writeErrs, err)
-			return
-		}
-		f.Flush()
-	}
-
-	// Hook up connections stream.
-	b.mu.Lock()
-	mak.NonNilMapForJSON(&b.serveStreamers)
-	if b.serveStreamers[port] == nil {
-		b.serveStreamers[port] = make(map[uint32]func(ipn.FunnelRequestLog))
-	}
-	id := uuid.New().ID()
-	b.serveStreamers[port][id] = writeToStream
-	b.mu.Unlock()
-
-	// Clean up streamer when done.
-	defer func() {
-		b.mu.Lock()
-		delete(b.serveStreamers[port], id)
-		b.mu.Unlock()
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Triggered by foreground `tailscale funnel` process
-		// (the streamer) getting closed, or by turning off Tailscale.
-	}
-
-	return errors.Join(writeErrs...)
-}
-
 func (b *LocalBackend) maybeLogServeConnection(destPort uint16, srcAddr netip.AddrPort) {
-	b.mu.Lock()
-	streamers := b.serveStreamers[destPort]
-	b.mu.Unlock()
-	if len(streamers) == 0 {
-		return
-	}
-
 	var log ipn.FunnelRequestLog
 	log.SrcAddr = srcAddr
 	log.Time = b.clock.Now()
@@ -342,10 +275,10 @@ func (b *LocalBackend) maybeLogServeConnection(destPort uint16, srcAddr netip.Ad
 			log.UserDisplayName = user.DisplayName
 		}
 	}
-
-	for _, stream := range streamers {
-		stream(log)
-	}
+	b.send(ipn.Notify{
+		FunnelRequestLog: &log,
+	})
+	return
 }
 
 func (b *LocalBackend) HandleIngressTCPConn(ingressPeer tailcfg.NodeView, target ipn.HostPort, srcAddr netip.AddrPort, getConnOrReset func() (net.Conn, bool), sendRST func()) {

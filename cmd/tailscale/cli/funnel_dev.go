@@ -5,10 +5,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -125,16 +125,20 @@ func (e *serveEnv) streamServe(ctx context.Context, req ipn.ServeStreamRequest) 
 		return fmt.Errorf("error setting serve config: %w", err)
 	}
 
-	stream, err := e.lc.StreamServe(ctx, req)
-	if err != nil {
-		return err
-	}
-	defer stream.Close()
-
 	fmt.Fprintf(os.Stderr, "Funnel started on \"https://%s\".\n", strings.TrimSuffix(string(req.HostPort), ":443"))
 	fmt.Fprintf(os.Stderr, "Press Ctrl-C to stop Funnel.\n\n")
-	_, err = io.Copy(os.Stdout, stream)
-	return err
+
+	for {
+		n, err := watcher.Next()
+		if err != nil {
+			return fmt.Errorf("error calling next: %w", err)
+		}
+		if n.FunnelRequestLog == nil {
+			continue
+		}
+		bts, _ := json.Marshal(n.FunnelRequestLog)
+		fmt.Printf("%s\n", bts)
+	}
 }
 
 func setHandler(sc *ipn.ServeConfig, req ipn.ServeStreamRequest, sessionID string) {

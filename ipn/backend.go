@@ -119,6 +119,10 @@ type Notify struct {
 	ClientVersion *tailcfg.ClientVersion `json:",omitempty"`
 
 	// type is mirrored in xcode/Shared/IPN.swift
+
+	// FunnelRequestLog is a notification that a request
+	// has been sent via the serve config.
+	FunnelRequestLog *FunnelRequestLog `json:",omitempty"`
 }
 
 func (n Notify) String() string {
