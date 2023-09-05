@@ -1324,7 +1324,7 @@ func (b *LocalBackend) Start(opts ipn.Options) error {
 	// but meanwhile we can make Start cheaper here for such a
 	// case and not restart the world (which takes a few seconds).
 	// Instead, just send a notify with the state that iOS needs.
-	if b.startIsNoopLocked(opts) && profileID == b.lastProfileID {
+	if b.startIsNoopLocked(opts) && profileID == b.lastProfileID && profileID != "" {
 		b.logf("Start: already running; sending notify")
 		nm := b.netMap
 		state := b.state
@@ -1470,6 +1470,13 @@ func (b *LocalBackend) Start(opts ipn.Options) error {
 	}
 
 	b.mu.Lock()
+	// Even though we reset b.cc above, we might have raced with
+	// another Start() call. If so, shut down the previous one again
+	// as we do not know if it was created with the same options.
+	prevCC = b.resetControlClientLocked()
+	if prevCC != nil {
+		defer prevCC.Shutdown() // must be called after b.mu is unlocked
+	}
 	b.cc = cc
 	b.ccAuto, _ = cc.(*controlclient.Auto)
 	endpoints := b.endpoints
@@ -4011,6 +4018,7 @@ func (b *LocalBackend) setNetMapLocked(nm *netmap.NetworkMap) {
 	if login != b.activeLogin {
 		b.logf("active login: %v", login)
 		b.activeLogin = login
+		b.lastProfileID = b.pm.CurrentProfile().ID
 	}
 	b.pauseOrResumeControlClientLocked()
 
